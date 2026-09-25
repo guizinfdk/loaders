@@ -32,7 +32,7 @@ local PASTA_OVOS   = "AreaEggSlotsClient"
 -- ============================================================
 -- 🔽 AQUI É ONDE VOCÊ CARREGA OS LOADERS DO SEU GITHUB
 -- ============================================================
-local BASE_URL = "https://raw.githubusercontent.com/guizinfdk/loaders/main/"
+local BASE_URL = "https://raw.githubusercontent.com/guizinfdk/loaders/refs/heads/main/"
 
 local PetDB = {}
 pcall(function()
