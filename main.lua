@@ -1,9 +1,9 @@
 --[[
-    PL HUB - MAIN
-    Este é o arquivo principal hospedado em:
+    PL HUB - MAIN (CORRIGIDO)
     https://raw.githubusercontent.com/guizinfdk/loaders/main/main.lua
-    
-    Carrega os loaders (pets.lua, assets.lua) e roda o HUB.
+
+    Parser recursivo — varre tabelas aninhadas (Placement, Mutations, etc.)
+    pra achar o nome do pet em qualquer layout de record.
 --]]
 
 local Players                = game:GetService("Players")
@@ -30,7 +30,7 @@ local NOME_SMART   = "SmartPromptPart"
 local PASTA_OVOS   = "AreaEggSlotsClient"
 
 -- ============================================================
--- 🔽 AQUI É ONDE VOCÊ CARREGA OS LOADERS DO SEU GITHUB
+-- LOADER — pets.lua
 -- ============================================================
 local BASE_URL = "https://raw.githubusercontent.com/guizinfdk/loaders/refs/heads/main/"
 
@@ -38,17 +38,13 @@ local PetDB = {}
 pcall(function()
     PetDB = loadstring(game:HttpGet(BASE_URL .. "pets.lua", true))() or {}
 end)
-print("[PL HUB] PetDB:", (function() local n=0 for _ in pairs(PetDB) do n=n+1 end return n end)(), "pets")
 
-local Assets = { Directory = {} }
-pcall(function()
-    local r = loadstring(game:HttpGet(BASE_URL .. "assets.lua", true))()
-    if type(r) == "table" then Assets = r end
-end)
-print("[PL HUB] Assets:", Assets.Directory and "✓" or "✗")
+local nPetDB = 0
+for _ in pairs(PetDB) do nPetDB = nPetDB + 1 end
+print("[PL HUB] PetDB carregado:", nPetDB, "pets")
 
 -- ============================================================
--- MÓDULO DO JOGO (não é loader — vem do próprio jogo)
+-- EggState (do jogo)
 -- ============================================================
 local EggState = require(ReplicatedStorage.Client.EggState)
 
@@ -83,7 +79,9 @@ local BIOMAS   = {
     ["Light Dark"]=true, ["Titan Temple"]=true,
 }
 
-local function isHex(s) return type(s) == "string" and s:match("^[%x]+$") ~= nil end
+local function isHex(s)
+    return type(s) == "string" and s:match("^[%x]+$") ~= nil
+end
 
 local function classificar(v)
     if type(v) ~= "string" then return nil end
@@ -97,37 +95,58 @@ local function classificar(v)
     return "pet"
 end
 
+-- ============================================================
+-- PARSER RECURSIVO — varre tabelas aninhadas
+-- ============================================================
+local function varrerRecursivo(t, prof, visitados, strings, cframes)
+    prof = prof or 0
+    visitados = visitados or {}
+    strings = strings or {}
+    cframes = cframes or {}
+
+    if prof > 5 then return strings, cframes end
+    if type(t) ~= "table" then return strings, cframes end
+    if visitados[t] then return strings, cframes end
+    visitados[t] = true
+
+    for _, v in pairs(t) do
+        local tv = typeof(v)
+        if tv == "string" then
+            table.insert(strings, v)
+        elseif tv == "CFrame" then
+            table.insert(cframes, v)
+        elseif tv == "table" then
+            varrerRecursivo(v, prof + 1, visitados, strings, cframes)
+        end
+    end
+    return strings, cframes
+end
+
 local function parseRecord(uid, record)
     if type(record) ~= "table" then return nil end
-    local info = { uid = uid, pet = nil, biome = nil, cframes = {}, cf = nil }
-    local candidatos = {}
-    for _, v in ipairs(record) do
-        local t = typeof(v)
-        if t == "CFrame" then
-            table.insert(info.cframes, v)
-        elseif t == "string" then
-            local cat = classificar(v)
-            if cat == "bioma" and not info.biome then
-                info.biome = v
-            elseif cat == "pet" then
-                table.insert(candidatos, v)
-            end
+
+    local strings, cframes = varrerRecursivo(record)
+
+    local info = { uid = uid, pet = nil, biome = nil, cf = nil }
+    local candidatosPet = {}
+
+    for _, s in ipairs(strings) do
+        local cat = classificar(s)
+        if cat == "bioma" and not info.biome then
+            info.biome = s
+        elseif cat == "pet" then
+            table.insert(candidatosPet, s)
         end
     end
 
-    for _, cand in ipairs(candidatos) do
+    -- Prioridade 1: pet conhecido no PetDB
+    for _, cand in ipairs(candidatosPet) do
         if PetDB[cand] then info.pet = cand; break end
     end
-    if not info.pet then
-        for _, cand in ipairs(candidatos) do
-            if Assets.Directory and Assets.Directory[cand] then
-                info.pet = cand; break
-            end
-        end
-    end
+    -- Prioridade 2: o nome mais longo
     if not info.pet then
         local melhor, tam = nil, 0
-        for _, cand in ipairs(candidatos) do
+        for _, cand in ipairs(candidatosPet) do
             if #cand > tam then melhor, tam = cand, #cand end
         end
         info.pet = melhor
@@ -135,10 +154,12 @@ local function parseRecord(uid, record)
 
     if not info.pet then return nil end
 
+    -- CFrame mais baixo (chão)
     local menorY = math.huge
-    for _, cf in ipairs(info.cframes) do
+    for _, cf in ipairs(cframes) do
         if cf.Position.Y < menorY then menorY = cf.Position.Y; info.cf = cf end
     end
+
     return info
 end
 
@@ -151,32 +172,6 @@ local function getDadosPet(pet)
         local d = PetDB[pet]
         local cor = d.color or (d.rarity and CORES_RARIDADE[d.rarity]) or nil
         return d.icon, d.rarity, cor
-    end
-    if Assets.Directory and Assets.Directory[pet] then
-        local entry = Assets.Directory[pet]
-        local icone, rar, cor
-        if type(entry.Egg) == "table" and type(entry.Egg[3]) == "string"
-            and entry.Egg[3]:match("^rbxassetid://") then
-            icone = entry.Egg[3]
-        end
-        if not icone then
-            for _, v in ipairs(entry) do
-                if type(v) == "table" then
-                    for _, w in ipairs(v) do
-                        if type(w) == "string" and w:match("^rbxassetid://") then
-                            icone = w; break
-                        end
-                    end
-                end
-                if icone then break end
-            end
-        end
-        if type(entry.Rarity) == "table" and type(entry.Rarity[3]) == "string" then
-            rar = entry.Rarity[3]
-            cor = entry.Rarity[4]
-        end
-        if rar and not cor then cor = CORES_RARIDADE[rar] end
-        return icone, rar, cor
     end
     return nil, nil, nil
 end
@@ -337,8 +332,10 @@ function D.iniciar()
             end
             for _, p in ipairs(cl:GetDescendants()) do
                 if p:IsA("BasePart") then
-                    p.Anchored = true; p.Collide = false
-                    p.CanCollide = false; p.CanTouch = false; p.CanQuery = false
+                    p.Anchored = true
+                    p.CanCollide = false
+                    p.CanTouch = false
+                    p.CanQuery = false
                 end
             end
             cl.Parent = Workspace
@@ -739,22 +736,19 @@ local cache = {}
 
 local function renderizar()
     local records = getRecords()
-    local pasta = varrerPasta()
+    local pasta   = varrerPasta()
     local root = T.root or (LP.Character and LP.Character:FindFirstChild("HumanoidRootPart"))
 
-    local nRec = 0
+    local nRec, nPasta = 0, 0
     for _ in pairs(records) do nRec = nRec + 1 end
-    local nPasta = 0
-    for _ in pairs(pasta) do nPasta = nPasta + 1 end
+    for _ in pairs(pasta)   do nPasta = nPasta + 1 end
 
     debugLb.Text = string.format(
         "DB:%s | Records:%d | Pasta:%d",
-        (function() local n=0 for _ in pairs(PetDB) do n=n+1 end return n>0 end)() and "✓" or "✗",
-        nRec, nPasta
+        (nPetDB > 0) and "✓" or "✗", nRec, nPasta
     )
 
-    local lista = {}
-    local vistos = {}
+    local lista, vistos = {}, {}
 
     for uid, rec in pairs(records) do
         local info = parseRecord(uid, rec)
@@ -770,184 +764,3 @@ local function renderizar()
     end
 
     for nome, dados in pairs(pasta) do
-        if not vistos[nome] then
-            local d = math.huge
-            if root and dados.cf then
-                d = (dados.cf.Position - root.Position).Magnitude
-            end
-            table.insert(lista, {
-                uid = nome, pet = "(sem nome)", biome = nil,
-                cf = dados.cf, dist = d,
-            })
-        end
-    end
-
-    table.sort(lista, function(a, b) return a.dist < b.dist end)
-
-    for i, info in ipairs(lista) do
-        local row, img, nm, rr, dd, stk
-        if cache[i] then
-            row, img, nm, rr, dd, stk = table.unpack(cache[i])
-            row.Visible = true
-        else
-            row, img, nm, rr, dd, stk = criarLinha(i)
-            row.Parent = scroll
-            cache[i] = {row, img, nm, rr, dd, stk}
-        end
-
-        local icone, rarN, rarC = getDadosPet(info.pet)
-        img.Image = icone or ""
-        nm.Text = info.pet or "?"
-
-        local suf = info.biome and (" • " .. info.biome) or ""
-        if rarN then
-            rr.Text = rarN .. suf
-            rr.TextColor3 = rarC or Color3.fromRGB(200, 200, 220)
-            stk.Color = rarC or ROXO_D
-        elseif info.biome then
-            rr.Text = info.biome
-            rr.TextColor3 = Color3.fromRGB(160, 150, 180)
-            stk.Color = ROXO_D
-        else
-            rr.Text = "—"
-            rr.TextColor3 = Color3.fromRGB(160, 150, 180)
-            stk.Color = ROXO_D
-        end
-
-        if info.dist ~= math.huge then
-            dd.Text = string.format("%d m", math.floor(info.dist + 0.5))
-        else
-            dd.Text = "? m"
-        end
-    end
-
-    for i = #lista + 1, #cache do
-        cache[i][1].Visible = false
-    end
-end
-
-local abaAtiva = "func"
-local function trocarAba(n)
-    abaAtiva = n
-    if n == "func" then
-        aFunc.Visible = true; aOv.Visible = false
-        bFunc.BackgroundColor3 = Color3.fromRGB(40, 28, 65); bOv.BackgroundColor3 = BG_BTN
-        bFunc.TextColor3 = ROXO; bOv.TextColor3 = Color3.fromRGB(235, 225, 255)
-    else
-        aFunc.Visible = false; aOv.Visible = true
-        bFunc.BackgroundColor3 = BG_BTN; bOv.BackgroundColor3 = Color3.fromRGB(40, 28, 65)
-        bFunc.TextColor3 = Color3.fromRGB(235, 225, 255); bOv.TextColor3 = Color3.fromRGB(180, 230, 255)
-        renderizar()
-    end
-end
-
-bFunc.MouseButton1Click:Connect(function() trocarAba("func") end)
-bOv.MouseButton1Click:Connect(function() trocarAba("ovos") end)
-trocarAba("func")
-
-task.spawn(function()
-    while gui.Parent do
-        if abaAtiva == "ovos" then pcall(renderizar) end
-        task.wait(0.75)
-    end
-end)
-
-bAnti.MouseButton1Click:Connect(function()
-    bncAnti()
-    armado = not armado
-    if not armado then T.parar(); D.limpar() end
-end)
-bDst.MouseButton1Click:Connect(function()
-    bncDst()
-    if not T.refs() then return end
-    Dest.pos = T.root.Position
-    Dest.usarSpawn = false
-end)
-bRst.MouseButton1Click:Connect(function()
-    bncRst()
-    Dest.pos = nil
-    Dest.usarSpawn = true
-end)
-
-UserInputService.InputBegan:Connect(function(i, gp)
-    if gp then return end
-    if i.KeyCode == Enum.KeyCode.T then
-        armado = not armado
-        if not armado then T.parar(); D.limpar() end
-    end
-end)
-
-local mini = false
-local tN = UDim2.new(0, 240, 0, 260)
-local tM = UDim2.new(0, 240, 0, 56)
-btnMin.MouseButton1Click:Connect(function()
-    mini = not mini
-    if mini then
-        tabBar.Visible = false; faixa.Visible = false
-        aFunc.Visible = false; aOv.Visible = false
-        btnMin.Text = "□"
-    else
-        tabBar.Visible = true; faixa.Visible = true
-        if abaAtiva == "func" then aFunc.Visible = true else aOv.Visible = true end
-        btnMin.Text = "—"
-    end
-    TweenService:Create(holder, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
-        Size = mini and tM or tN
-    }):Play()
-end)
-
-task.spawn(function()
-    while gui.Parent do
-        for r = 0, 360, 6 do
-            if not gui.Parent then break end
-            gradB.Rotation = r
-            task.wait(0.03)
-        end
-    end
-end)
-
-task.spawn(function()
-    while gui.Parent do
-        TweenService:Create(led, TweenInfo.new(0.6, Enum.EasingStyle.Sine), {
-            BackgroundTransparency = 0.4, Size = UDim2.new(0, 5, 0, 5),
-            Position = UDim2.new(0, 10, 0, 13),
-        }):Play()
-        task.wait(0.6)
-        if not gui.Parent then break end
-        TweenService:Create(led, TweenInfo.new(0.6, Enum.EasingStyle.Sine), {
-            BackgroundTransparency = 0, Size = UDim2.new(0, 6, 0, 6),
-            Position = UDim2.new(0, 10, 0, 13),
-        }):Play()
-        task.wait(0.6)
-    end
-end)
-
-task.spawn(function()
-    while gui.Parent do
-        if armado then
-            cAnti.BackgroundColor3 = Color3.fromRGB(20, 55, 28)
-            brAnti.BackgroundColor3 = VERDE; borAnti.Color = VERDE
-            lAnti.TextColor3 = Color3.fromRGB(180, 255, 200); sAnti.TextColor3 = VERDE
-            lAnti.Text = "🥚 ANTI-BOSS  [ON]"
-        else
-            cAnti.BackgroundColor3 = BG_BTN
-            brAnti.BackgroundColor3 = ROXO; borAnti.Color = ROXO_D
-            lAnti.TextColor3 = Color3.fromRGB(230, 220, 255); sAnti.TextColor3 = ROXO
-            lAnti.Text = "🥚 ANTI-BOSS"
-        end
-        if Dest.usarSpawn then
-            cDst.BackgroundColor3 = BG_BTN
-            brDst.BackgroundColor3 = ROXO; borDst.Color = ROXO_D
-            lDst.TextColor3 = Color3.fromRGB(230, 220, 255)
-            lDst.Text = "📍 DEFINIR DESTINO"
-        else
-            cDst.BackgroundColor3 = Color3.fromRGB(20, 45, 55)
-            brDst.BackgroundColor3 = AZUL; borDst.Color = AZUL
-            lDst.TextColor3 = Color3.fromRGB(180, 230, 255)
-            lDst.Text = "✅ DESTINO SALVO"
-        end
-        task.wait(0.15)
-    end
-end)
-
-print("[PL HUB] Carregado com sucesso.")
